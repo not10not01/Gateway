@@ -23,6 +23,7 @@ from trainer import TrainerManager, MIN_WINDOWS, WINDOW_SIZE
 from classifier import DEFAULT_HEAD_PATH
 from waveform import WaveformAggregator, WaveformBus
 from iso20816 import ProfileStore, StableEvaluator
+from simulator import SimulatedSensor, SIMULATED_PORT
 
 
 SSE_HEARTBEAT_S = 15
@@ -136,6 +137,9 @@ class RemoteRecorder:
 
 def build_app():
     ports = [p for p in get_existed_serial_ports() if p in ALLOWED_PORTS]
+    simulate = os.getenv("MATRIX800_SIMULATE", "").lower() in ("1", "true", "yes")
+    if simulate and SIMULATED_PORT not in ports:
+        ports.append(SIMULATED_PORT)
     print(f"[app] sensors detected: {ports}")
 
     data_dir = os.path.join(current_path, DATA_DIR)
@@ -147,6 +151,12 @@ def build_app():
     machine_profiles = ProfileStore(
         os.path.join(current_path, MACHINE_PROFILES_FILENAME))
     iso_evaluator = StableEvaluator()
+    if simulate and not machine_profiles.get(SIMULATED_PORT)["enabled"]:
+        machine_profiles.set(SIMULATED_PORT, {
+            "enabled": True, "rpm": 1800, "rated_power_kw": 100,
+            "shaft_height_mm": None, "support": "rigid", "group": "auto",
+            "hold_seconds": 0, "hysteresis_mm_s": 0.2,
+        })
 
     # mp.Queue caps: window pickling ~1-2 ms vs 167 ms hop; cap 16 gives 4
     # readers headroom before put() blocks (drop-oldest kicks in first).
@@ -171,6 +181,8 @@ def build_app():
     metrics_events = {p: mp.Event() for p in ports}
     reader_procs = {}
     for p in ports:
+        if p == SIMULATED_PORT:
+            continue
         proc = mp.Process(
             target=reader_process_main,
             args=(p, window_queue, req_qs[p], resp_qs[p],
@@ -217,6 +229,12 @@ def build_app():
             waveform_agg.append(port, chunk)
 
     threading.Thread(target=raw_drain_loop, daemon=True, name="raw-drain").start()
+
+    simulator = None
+    if simulate:
+        simulator = SimulatedSensor(metrics_queue, raw_queue)
+        simulator.start()
+        print(f"[app] simulated sensor started on {SIMULATED_PORT}")
 
     # Display tick: decouples SSE push cadence from the 144 Hz append rate;
     # FFT self-throttles inside render_tick().
@@ -533,6 +551,20 @@ def build_app():
     @app.route("/api/metrics")
     def metrics_snapshot():
         return jsonify(metrics_payload())
+
+    @app.route("/api/simulator", methods=["GET", "POST"])
+    def simulator_control():
+        if simulator is None:
+            return jsonify({"enabled": False}), 404
+        if request.method == "GET":
+            return jsonify(simulator.status())
+        body = request.get_json(silent=True) or {}
+        try:
+            return jsonify(simulator.configure(
+                mode=body.get("mode"),
+                velocity_mm_s=body.get("velocity_mm_s")))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.route("/api/waveform")
     def waveform_snapshot():

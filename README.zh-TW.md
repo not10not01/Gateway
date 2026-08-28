@@ -33,7 +33,15 @@ python app.py                   # http://<board-ip>/
 尚未接 sensor 時，可用一般帳號在 8080 埠安全測試網頁：
 
 ```bash
-MATRIX800_SENSOR_PORTS='' MATRIX800_HTTP_PORT=8080 python3 app.py
+MATRIX800_SENSOR_PORTS='' MATRIX800_SIMULATE=1 MATRIX800_HTTP_PORT=8080 python3 app.py
+```
+
+模擬器預設每 10 秒循環 A/B/C/D。也可手動指定 Velocity RMS：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/simulator \
+  -H 'Content-Type: application/json' \
+  -d '{"velocity_mm_s":3.5}'
 ```
 
 在實機上，請**先設定 NPU 驅動程式**——這是設錯就會無聲失敗的關鍵步驟。
