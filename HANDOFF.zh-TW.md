@@ -113,7 +113,7 @@ python -m unittest discover -s tests -v
 
 ```text
 tflite_runtime
-/usr/lib/libethosu_delegate.so
+/usr/local/lib/libethosu_delegate.so
 models/vibration_backbone_int8_vela.tflite
 ```
 

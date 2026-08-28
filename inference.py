@@ -9,8 +9,12 @@ from classifier import ClassifierHead, DEFAULT_HEAD_PATH
 # PORT: same Matrix800 NPU, two drivers. Change these two + the runtime import
 # in _try_load_interpreter to match the board's driver (NXP or Mesa). See
 # docs/getting-started.md "Choose your NPU driver".
-NPU_MODEL_PATH = "models/vibration_backbone_int8_vela.tflite"  # Vela int8, NXP/Ethos-U
-DELEGATE_PATH  = "/usr/lib/libethosu_delegate.so"             # PORT
+NPU_MODEL_PATH = os.getenv(
+    "MATRIX800_NPU_MODEL", "models/vibration_backbone_int8_vela.tflite"
+)  # Vela int8, NXP/Ethos-U
+DELEGATE_PATH = os.getenv(
+    "MATRIX800_DELEGATE", "/usr/local/lib/libethosu_delegate.so"
+)
 
 
 class InferenceWorker(threading.Thread):
@@ -50,8 +54,8 @@ class InferenceWorker(threading.Thread):
             print(f"[inference] tflite_runtime not available ({e}); stub mode")
             return
 
-        if not os.path.exists(NPU_MODEL_PATH):
-            print(f"[inference] model not found at {NPU_MODEL_PATH}; stub mode")
+        if not os.path.exists(self.model_path):
+            print(f"[inference] model not found at {self.model_path}; stub mode")
             return
         if not os.path.exists(self.delegate_path):
             print(f"[inference] Ethos-U delegate not found at {self.delegate_path}; stub mode")
@@ -59,7 +63,7 @@ class InferenceWorker(threading.Thread):
 
         try:
             delegate = load_delegate(self.delegate_path)
-            interp = Interpreter(model_path=NPU_MODEL_PATH,
+            interp = Interpreter(model_path=self.model_path,
                                  experimental_delegates=[delegate])
             interp.allocate_tensors()
         except Exception as e:

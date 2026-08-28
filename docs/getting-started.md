@@ -48,7 +48,7 @@ Then set three values in `inference.py` to match:
 | | **NXP driver** (default) | **Mesa driver** |
 |---|---|---|
 | Runtime import (`_try_load_interpreter`) | `from tflite_runtime.interpreter import ...` | `from ai_edge_litert.interpreter import ...` |
-| `DELEGATE_PATH` | `/usr/lib/libethosu_delegate.so` | `/usr/local/lib/aarch64-linux-gnu/libteflon.so` |
+| `DELEGATE_PATH` | `/usr/local/lib/libethosu_delegate.so` | `/usr/local/lib/aarch64-linux-gnu/libteflon.so` |
 | `NPU_MODEL_PATH` | `models/vibration_backbone_int8_vela.tflite` | `models/vibration_backbone_int8.tflite` |
 
 The code is set for the **NXP driver**. If your board uses the **Mesa driver**,

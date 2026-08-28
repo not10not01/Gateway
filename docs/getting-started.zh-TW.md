@@ -49,7 +49,7 @@ ls /dev/accel     # 存在 → Mesa 驅動
 | | **NXP 驅動**（預設） | **Mesa 驅動** |
 |---|---|---|
 | 執行環境 import（`_try_load_interpreter`） | `from tflite_runtime.interpreter import ...` | `from ai_edge_litert.interpreter import ...` |
-| `DELEGATE_PATH` | `/usr/lib/libethosu_delegate.so` | `/usr/local/lib/aarch64-linux-gnu/libteflon.so` |
+| `DELEGATE_PATH` | `/usr/local/lib/libethosu_delegate.so` | `/usr/local/lib/aarch64-linux-gnu/libteflon.so` |
 | `NPU_MODEL_PATH` | `models/vibration_backbone_int8_vela.tflite` | `models/vibration_backbone_int8.tflite` |
 
 程式碼預設為 **NXP 驅動**。若你的板子使用 **Mesa 驅動**，請修改那三行。

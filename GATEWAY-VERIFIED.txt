@@ -11,9 +11,16 @@ OS: Ubuntu 26.04 LTS (Resolute Raccoon)
 Kernel: Linux 6.18.20-matrix800 aarch64
 Python: 3.14.4
 NPU device: /dev/ethosu0
+NPU delegate: /usr/local/lib/libethosu_delegate.so
+Bundled NPU runtime: /opt/npu/wheels/tflite_runtime-2.18.0-cp312-cp312-linux_aarch64.whl
 Serial devices: /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyUSB2, /dev/ttyUSB3
 RAM: approximately 1.9 GiB
 Root filesystem: approximately 13 GiB, 11 GiB available at verification
 
 No vibration sensor was connected during verification.
-No software was installed and no Gateway configuration was changed.
+Gateway Python has no pip or python3.14-venv package installed.
+The bundled tflite_runtime wheel requires CPython 3.12 and cannot be loaded by
+the system CPython 3.14 interpreter.
+The source deployment was extracted to:
+/home/guest/matrix800-iso20816-gateway.new
+No system package was installed and no service was enabled.
