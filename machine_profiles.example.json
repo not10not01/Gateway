@@ -1,0 +1,12 @@
+{
+  "/dev/ttyUSB0": {
+    "enabled": true,
+    "rpm": 1800,
+    "rated_power_kw": 75,
+    "shaft_height_mm": null,
+    "support": "rigid",
+    "group": "auto",
+    "hold_seconds": 10,
+    "hysteresis_mm_s": 0.2
+  }
+}

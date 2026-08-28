@@ -1,0 +1,10 @@
+# Runtime — required
+Flask==3.1.3
+numpy==2.4.4
+pandas==3.0.2
+pyserial==3.5
+
+# Runtime — optional
+# TFLite: not on PyPI, ships with the board's NPU driver. The NXP driver uses
+# tflite_runtime; the Mesa driver uses ai-edge-litert. See docs/getting-started.md.
+pyfftw

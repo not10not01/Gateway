@@ -1,0 +1,72 @@
+# .github/workflows/ci.yml
+#
+# CI for the accelerometer demo. Runs on every push / PR to master.
+#
+# This project is hardware-bound: real inference needs the NXP Ethos-U NPU
+# (tflite_runtime + libethosu_delegate.so), neither of which exists on a GitHub
+# runner and tflite_runtime isn't even on PyPI. So CI does NOT try to run the
+# model — it only verifies what can be checked off-hardware:
+#   lint    — flake8 across all .py
+#   compile — byte-compile everything + import app (the tflite import is lazy,
+#             inside InferenceWorker._try_load_interpreter, so `import app`
+#             succeeds without any NPU runtime present).
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+
+  # ── 1. Lint ────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (flake8)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Run flake8
+        run: |
+          flake8 . \
+            --max-line-length=120 \
+            --extend-ignore=E221,E402,E702,E741,E127,E131 \
+            --exclude=.venv,__pycache__ \
+            --count \
+            --statistics
+
+  # ── 2. Compile + import ────────────────────────────────────────────────────
+  compile:
+    name: Compile + import
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install non-hardware deps
+        run: pip install Flask==3.1.3 numpy==2.4.4 pandas==3.0.2 pyserial==3.5
+
+      - name: Byte-compile every module
+        run: python -m compileall -q .
+
+      - name: Import the app (tflite import is lazy — no NPU runtime needed)
+        run: python -c "import app"

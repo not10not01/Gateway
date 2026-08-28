@@ -1,0 +1,412 @@
+{% extends "_layout.html" %}
+{% block title %}Data recording · npu-classifier{% endblock %}
+
+{% block head %}
+<style>
+  /* Per-row delete: ghost by default, destructive on hover (shadcn). */
+  .btn-delete {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px;
+    border: 1px solid transparent; border-radius: var(--radius);
+    background: transparent; color: var(--muted-foreground);
+    cursor: pointer; transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+  }
+  .btn-delete:hover {
+    background: hsl(0 72% 97%); color: var(--destructive); border-color: var(--border);
+  }
+  .btn-delete .icon { width: 15px; height: 15px; }
+  .table td.actions { text-align: right; width: 1%; white-space: nowrap; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Data recording</h1>
+  </div>
+</div>
+
+<!-- Existing labels -->
+<section class="card">
+  <div class="card-header">
+    <h2 class="card-title">Existing data</h2>
+  </div>
+  <div class="card-content" style="padding: 0;">
+    <div id="labels-empty" class="empty" style="margin: 20px;">No recordings yet — capture one below.</div>
+    <table class="table" id="labels-table" style="display: none;">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th class="num">Samples</th>
+          <th class="num">Duration</th>
+          <th class="num">Size</th>
+          <th>Last modified</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- New recording -->
+<section class="card">
+  <div class="card-header">
+    <h2 class="card-title">New recording</h2>
+  </div>
+  <div class="card-content">
+    <div class="form-grid">
+      <div class="field">
+        <label class="label" for="rec-name">Name</label>
+        <input class="input" id="rec-name" type="text" placeholder="e.g. steady, shake, circle"
+               autocomplete="off" maxlength="64">
+      </div>
+
+      <div class="field">
+        <label class="label" for="rec-port">Sensor port</label>
+        <select class="select" id="rec-port"></select>
+      </div>
+
+      <div class="field">
+        <label class="label">Mode</label>
+        <div class="segmented" id="rec-mode" data-value="append">
+          <button type="button" data-mode="append" class="active">Append</button>
+          <button type="button" data-mode="overwrite">Overwrite</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="label">Duration</label>
+        <div class="field-row">
+          <div class="field" style="gap: 4px;">
+            <label class="helper" for="rec-seconds">Seconds</label>
+            <input class="input" id="rec-seconds" type="number" min="0.13" step="0.1" value="5">
+          </div>
+          <div class="field" style="gap: 4px;">
+            <label class="helper" for="rec-samples">Samples</label>
+            <input class="input" id="rec-samples" type="number" min="{{ min_samples }}" step="1">
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-top: 4px;">
+        <button class="btn btn-primary" id="rec-start" disabled>Start recording</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Live progress -->
+<section class="card" id="progress-card" style="display: none;">
+  <div class="card-header">
+    <h2 class="card-title">Recording in progress</h2>
+  </div>
+  <div class="card-content">
+    <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+    <div class="kv">
+      <div><span class="k">Elapsed</span><span class="v" id="progress-elapsed">0 s</span></div>
+      <div><span class="k">Samples</span><span class="v" id="progress-samples">0 / 0</span></div>
+      <div><span class="k">Progress</span><span class="v" id="progress-percent">0%</span></div>
+      <div><span class="k">Port</span><span class="v" id="progress-port">—</span></div>
+    </div>
+    <div style="margin-top: 14px;">
+      <button class="btn btn-secondary" id="rec-cancel">Cancel</button>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+import { setIfChanged, fmtNumber, fmtBytes, fmtRelative, showToast } from "{{ url_for('static', filename='app.js') }}";
+
+const SAMPLE_RATE = {{ sample_rate }};
+const MIN_SAMPLES = {{ min_samples }};
+const ALIASES     = {{ aliases|tojson }};
+const portLabel   = (p) => ALIASES[p] || p;
+
+// --- Element refs ---
+const nameEl       = document.getElementById("rec-name");
+const portEl       = document.getElementById("rec-port");
+const modeEl       = document.getElementById("rec-mode");
+const secondsEl    = document.getElementById("rec-seconds");
+const samplesEl    = document.getElementById("rec-samples");
+const startBtn     = document.getElementById("rec-start");
+const cancelBtn    = document.getElementById("rec-cancel");
+
+const progressCard    = document.getElementById("progress-card");
+const progressBar     = document.getElementById("progress-bar");
+const progressElapsed = document.getElementById("progress-elapsed");
+const progressSamples = document.getElementById("progress-samples");
+const progressPercent = document.getElementById("progress-percent");
+const progressPort    = document.getElementById("progress-port");
+
+const labelsTable = document.getElementById("labels-table");
+const labelsEmpty = document.getElementById("labels-empty");
+
+// --- State ---
+let availablePorts = [];
+let pollHandle = null;
+
+// --- Name input ---
+function sanitizePreview(raw) {
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "").slice(0, 64);
+  return cleaned;
+}
+function updateNamePreview() {
+  refreshStartEnabled();
+}
+nameEl.addEventListener("input", updateNamePreview);
+
+// --- Duration linkage ---
+function setSamplesFromSeconds() {
+  const s = parseFloat(secondsEl.value);
+  if (!Number.isFinite(s) || s <= 0) return;
+  samplesEl.value = Math.max(MIN_SAMPLES, Math.round(s * SAMPLE_RATE));
+  refreshStartEnabled();
+}
+function setSecondsFromSamples() {
+  const n = parseInt(samplesEl.value, 10);
+  if (!Number.isFinite(n) || n <= 0) return;
+  secondsEl.value = (n / SAMPLE_RATE).toFixed(2);
+  refreshStartEnabled();
+}
+secondsEl.addEventListener("input", setSamplesFromSeconds);
+samplesEl.addEventListener("input", setSecondsFromSamples);
+setSamplesFromSeconds();   // seed initial samples value from default 5 s
+
+// --- Mode segmented ---
+modeEl.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  for (const b of modeEl.querySelectorAll("button")) b.classList.remove("active");
+  btn.classList.add("active");
+  modeEl.dataset.value = btn.dataset.mode;
+});
+
+// --- Start enabled gate ---
+function refreshStartEnabled() {
+  const cleaned = sanitizePreview(nameEl.value);
+  const samples = parseInt(samplesEl.value, 10);
+  const ok = !!cleaned
+          && Number.isFinite(samples) && samples >= MIN_SAMPLES
+          && availablePorts.length > 0;
+  startBtn.disabled = !ok;
+}
+
+// --- Recordings table ---
+async function refreshRecordings() {
+  const r = await fetch("/api/recordings");
+  if (!r.ok) return;
+  const data = await r.json();
+
+  // Update port select
+  availablePorts = data.ports || [];
+  const prev = portEl.value;
+  portEl.innerHTML = "";
+  if (availablePorts.length === 0) {
+    const opt = document.createElement("option");
+    opt.textContent = "no sensors connected";
+    opt.disabled = true;
+    portEl.appendChild(opt);
+    portEl.disabled = true;
+  } else {
+    portEl.disabled = false;
+    for (const p of availablePorts) {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = portLabel(p);
+      opt.title = p;
+      portEl.appendChild(opt);
+    }
+    if (prev && availablePorts.includes(prev)) portEl.value = prev;
+  }
+
+  // Update labels table
+  const labels = data.labels || [];
+  const tbody = labelsTable.querySelector("tbody");
+  tbody.innerHTML = "";
+  if (labels.length === 0) {
+    labelsTable.style.display = "none";
+    labelsEmpty.style.display = "";
+  } else {
+    labelsTable.style.display = "";
+    labelsEmpty.style.display = "none";
+    for (const l of labels) {
+      const tr = document.createElement("tr");
+      const dur = (l.samples / SAMPLE_RATE);
+      tr.innerHTML = `
+        <td><strong>${l.name}</strong></td>
+        <td class="num">${fmtNumber(l.samples)}</td>
+        <td class="num">${dur.toFixed(1)} s</td>
+        <td class="num">${fmtBytes(l.file_size)}</td>
+        <td>${fmtRelative(l.mtime)}</td>
+        <td class="actions">
+          <button class="btn-delete" data-del="${l.name}" title="Delete recording" aria-label="Delete recording">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+              <path d="M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  refreshStartEnabled();
+}
+
+// --- Progress rendering ---
+function renderProgress(s) {
+  if (!s || s.status !== "active") {
+    progressCard.style.display = "none";
+    return;
+  }
+  progressCard.style.display = "";
+  const pct = Math.round((s.progress || 0) * 100);
+  progressBar.style.width = pct + "%";
+  progressElapsed.textContent = `${Math.floor(s.elapsed_s || 0)} s`;
+  progressSamples.textContent = `${fmtNumber(s.samples_written)} / ${fmtNumber(s.target_samples)}`;
+  progressPercent.textContent = `${pct}%`;
+  progressPort.textContent = s.port ? portLabel(s.port) : "—";
+}
+
+// Poll /api/record/status while a recording is active, mirroring the train
+// page. Recording progress is time-gated, so a 1 Hz client poll of the cheap
+// status GET is the right cadence — no server-held SSE thread per open tab.
+async function pollStatus() {
+  const r = await fetch("/api/record/status");
+  if (!r.ok) return;
+  const { session: s } = await r.json();
+
+  if (s && s.status === "active") {
+    renderProgress(s);
+    startBtn.disabled = true;
+    return;
+  }
+
+  // Terminal (or no session): stop the loop and react to the outcome once.
+  // Because we only poll while active, a stale _last_finished session on
+  // page load never reaches here — no spurious reload toasts.
+  renderProgress(null);
+  stopPolling();
+  refreshStartEnabled();
+  if (s) {
+    if (s.status === "complete") {
+      showToast(`Saved ${s.file_path} (${fmtNumber(s.samples_written)} samples)`);
+      refreshRecordings();
+    } else if (s.status === "cancelled") {
+      showToast(`Cancelled — kept ${fmtNumber(s.samples_written)} samples in ${s.file_path}`);
+      refreshRecordings();
+    } else if (s.status === "error") {
+      showToast(`Error: ${s.error || "unknown"}`, { error: true, durationMs: 6000 });
+      refreshRecordings();
+    }
+  }
+}
+
+function startPolling() {
+  if (pollHandle != null) return;
+  pollHandle = setInterval(pollStatus, 1000);
+}
+function stopPolling() {
+  if (pollHandle != null) { clearInterval(pollHandle); pollHandle = null; }
+}
+
+// --- Start / cancel handlers ---
+startBtn.addEventListener("click", async () => {
+  const name = sanitizePreview(nameEl.value);
+  const target_samples = parseInt(samplesEl.value, 10);
+  const port = portEl.value;
+  const mode = modeEl.dataset.value || "append";
+
+  startBtn.disabled = true;
+  try {
+    const r = await fetch("/api/record/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, target_samples, port, mode }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      showToast(data.error || "Failed to start", { error: true });
+      refreshStartEnabled();
+      return;
+    }
+    renderProgress(data.session);
+    startPolling();
+  } catch (err) {
+    showToast(String(err), { error: true });
+    refreshStartEnabled();
+  }
+});
+
+// --- Delete handler ---
+labelsTable.addEventListener("click", async (e) => {
+  // Check if the clicked element (or its parent) is our delete button
+  const deleteBtn = e.target.closest('.btn-delete');
+  if (!deleteBtn) return;
+
+  // Extract the recording name from the data-del attribute
+  const recordingName = deleteBtn.dataset.del; // clean dataset alternative to getAttribute
+
+  // 1. Confirm with the user
+  if (!confirm(`Are you sure you want to delete the recording "${recordingName}"?`)) {
+    return;
+  }
+
+  // 2. Disable the button visually while processing
+  deleteBtn.disabled = true;
+  deleteBtn.style.opacity = '0.5';
+
+  try {
+    // 3. Send the request (Adjust URL/Method if your Flask app uses something else!)
+    const response = await fetch('/api/recordings/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: recordingName })
+    });
+
+    const result = await response.json();
+
+    if (response.ok) {
+      // 4. Success! Toast and refresh to handle table empty states naturally
+      showToast(`Deleted recording "${recordingName}"`);
+      refreshRecordings();
+    } else {
+      showToast(result.error || 'Failed to delete the recording.', { error: true });
+      deleteBtn.disabled = false;
+      deleteBtn.style.opacity = '1';
+    }
+  } catch (error) {
+    console.error('Delete error:', error);
+    showToast('A network error occurred while trying to delete.', { error: true });
+    deleteBtn.disabled = false;
+    deleteBtn.style.opacity = '1';
+  }
+});
+
+cancelBtn.addEventListener("click", async () => {
+  await fetch("/api/record/cancel", { method: "POST" });
+  pollStatus();  // pick up the cancelled status immediately
+});
+
+// --- Bootstrap ---
+(async function init() {
+  await refreshRecordings();
+  // Pick up an in-progress recording if we landed mid-session, and only then
+  // start polling — a stale terminal session on load renders nothing and fires
+  // no toast.
+  const r = await fetch("/api/record/status");
+  if (r.ok) {
+    const { session: s } = await r.json();
+    if (s && s.status === "active") {
+      renderProgress(s);
+      startPolling();
+    }
+  }
+})();
+</script>
+{% endblock %}

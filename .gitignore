@@ -1,0 +1,10 @@
+__pycache__
+.venv/
+*.pyc
+machine_profiles.json
+port_aliases.json
+classifier_head.json
+data/*.bin
+
+CLAUDE.local.md
+setup.md

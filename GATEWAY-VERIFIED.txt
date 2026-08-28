@@ -1,0 +1,19 @@
+Matrix-800 verification record
+Date: 2026-08-28 Asia/Taipei
+
+LAN2 interface: end1
+LAN2 address: 192.168.2.127/24
+LAN1 interface: end0
+SSH TCP/22: reachable
+Gateway MAC observed from PC: 00-13-48-04-fe-17
+
+OS: Ubuntu 26.04 LTS (Resolute Raccoon)
+Kernel: Linux 6.18.20-matrix800 aarch64
+Python: 3.14.4
+NPU device: /dev/ethosu0
+Serial devices: /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyUSB2, /dev/ttyUSB3
+RAM: approximately 1.9 GiB
+Root filesystem: approximately 13 GiB, 11 GiB available at verification
+
+No vibration sensor was connected during verification.
+No software was installed and no Gateway configuration was changed.

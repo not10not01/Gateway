@@ -1,0 +1,160 @@
+{% extends "_layout.html" %}
+{% block title %}Settings · npu-classifier{% endblock %}
+
+{% block head %}
+<style>
+  .settings-grid { display: grid; gap: 16px; }
+  .sensor-settings { overflow: hidden; }
+  .sensor-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .port-path { font: 12px var(--font-mono); color: var(--muted-foreground); }
+  .profile-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  @media (max-width: 1100px) { .profile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 650px) { .profile-grid { grid-template-columns: 1fr; } }
+  .toggle-row { display: flex; align-items: center; gap: 9px; min-height: 36px; }
+  .toggle-row input { width: 18px; height: 18px; }
+  .save-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  .save-status { font-size: 12px; color: var(--muted-foreground); }
+  .save-status.saved { color: var(--axis-y); }
+  .save-status.error { color: var(--destructive); }
+  .scope-note { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--muted); color: var(--muted-foreground); font-size: 12px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Settings</h1>
+    <div class="page-subtitle">Sensor names and ISO 20816-3 machine profiles.</div>
+  </div>
+</div>
+
+<div class="settings-grid">
+{% for p in ports %}
+{% set profile = machine_profiles.get(p, {}) %}
+<section class="card sensor-settings" data-port-card="{{ p }}">
+  <div class="card-header sensor-title">
+    <div>
+      <h2 class="card-title">{{ aliases.get(p, p) }}</h2>
+      <div class="port-path">{{ p }}</div>
+    </div>
+    <label class="toggle-row">
+      <input type="checkbox" data-field="enabled" {% if profile.get('enabled') %}checked{% endif %}>
+      <span>Enable ISO evaluation</span>
+    </label>
+  </div>
+  <div class="card-content">
+    <div class="profile-grid">
+      <label class="field">
+        <span class="label">Display name</span>
+        <input class="input" data-field="alias" type="text" value="{{ aliases.get(p, '') }}" placeholder="{{ p }}">
+      </label>
+      <label class="field">
+        <span class="label">Rated power (kW)</span>
+        <input class="input" data-field="rated_power_kw" type="number" min="0" step="0.1" value="{{ profile.get('rated_power_kw') or '' }}">
+      </label>
+      <label class="field">
+        <span class="label">Speed (RPM)</span>
+        <input class="input" data-field="rpm" type="number" min="0" step="1" value="{{ profile.get('rpm') or '' }}">
+      </label>
+      <label class="field">
+        <span class="label">Shaft height (mm, optional)</span>
+        <input class="input" data-field="shaft_height_mm" type="number" min="0" step="1" value="{{ profile.get('shaft_height_mm') or '' }}">
+      </label>
+      <label class="field">
+        <span class="label">Support type</span>
+        <select class="select" data-field="support">
+          <option value="rigid" {% if profile.get('support', 'rigid') == 'rigid' %}selected{% endif %}>Rigid</option>
+          <option value="flexible" {% if profile.get('support') == 'flexible' %}selected{% endif %}>Flexible</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="label">Machine group</span>
+        <select class="select" data-field="group">
+          <option value="auto" {% if profile.get('group', 'auto') == 'auto' %}selected{% endif %}>Auto from power / shaft height</option>
+          <option value="1" {% if profile.get('group') == '1' %}selected{% endif %}>Group 1</option>
+          <option value="2" {% if profile.get('group') == '2' %}selected{% endif %}>Group 2</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="label">Confirmation time (s)</span>
+        <input class="input" data-field="hold_seconds" type="number" min="0" max="3600" step="1" value="{{ profile.get('hold_seconds', 10) }}">
+      </label>
+      <label class="field">
+        <span class="label">Recovery hysteresis (mm/s)</span>
+        <input class="input" data-field="hysteresis_mm_s" type="number" min="0" max="10" step="0.1" value="{{ profile.get('hysteresis_mm_s', 0.2) }}">
+      </label>
+    </div>
+    <div class="scope-note">
+      Uses max(X, Y, Z) from the sensor's broad-band Velocity RMS register. RPM selects 10–1000 Hz above 600 RPM or 2–1000 Hz at 120–600 RPM. Values below 120 RPM and machines at or below 15 kW require another applicable standard or OEM criteria.
+    </div>
+    <div class="save-row">
+      <button class="btn btn-primary" type="button" data-save>Save settings</button>
+      <span class="save-status" data-status></span>
+    </div>
+  </div>
+</section>
+{% else %}
+<div class="empty">No sensors connected.</div>
+{% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+import { setIfChanged } from "{{ url_for('static', filename='app.js') }}";
+
+const optionalNumber = (card, name) => {
+  const raw = card.querySelector(`[data-field="${name}"]`).value.trim();
+  return raw === "" ? null : Number(raw);
+};
+
+async function saveCard(card) {
+  const port = card.dataset.portCard;
+  const status = card.querySelector("[data-status]");
+  const button = card.querySelector("[data-save]");
+  button.disabled = true;
+  status.className = "save-status";
+  setIfChanged(status, "textContent", "saving…");
+
+  const alias = card.querySelector('[data-field="alias"]').value;
+  const profile = {
+    enabled: card.querySelector('[data-field="enabled"]').checked,
+    rated_power_kw: optionalNumber(card, "rated_power_kw"),
+    rpm: optionalNumber(card, "rpm"),
+    shaft_height_mm: optionalNumber(card, "shaft_height_mm"),
+    support: card.querySelector('[data-field="support"]').value,
+    group: card.querySelector('[data-field="group"]').value,
+    hold_seconds: optionalNumber(card, "hold_seconds"),
+    hysteresis_mm_s: optionalNumber(card, "hysteresis_mm_s"),
+  };
+
+  try {
+    const [aliasResponse, profileResponse] = await Promise.all([
+      fetch("/api/port_alias", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({port, alias}),
+      }),
+      fetch("/api/iso20816/profile", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({port, profile}),
+      }),
+    ]);
+    const aliasData = await aliasResponse.json();
+    const profileData = await profileResponse.json();
+    const error = aliasData.error || profileData.error;
+    if (error) throw new Error(error);
+    setIfChanged(status, "textContent", "saved");
+    status.classList.add("saved");
+  } catch (error) {
+    setIfChanged(status, "textContent", error.message || "network error");
+    status.classList.add("error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+for (const card of document.querySelectorAll("[data-port-card]")) {
+  card.querySelector("[data-save]").addEventListener("click", () => saveCard(card));
+}
+</script>
+{% endblock %}

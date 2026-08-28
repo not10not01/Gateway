@@ -1,0 +1,715 @@
+import json
+import multiprocessing as mp
+import os
+import queue
+import sys
+import threading
+import time
+
+# Bundled deps live in ./site-packages on the embedded device. Harmless when
+# empty; spawned children re-apply it (see reader_process_main). docs/modules.md.
+current_path = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(current_path, "site-packages"))
+
+from flask import Flask, Response, jsonify, render_template, request
+
+from state import RollingPredictions, SnapshotBus, ROLLING_WINDOW
+from sensor_reader import (reader_process_main, ALLOWED_PORTS,
+                           get_existed_serial_ports, SAMPLE_RATE)
+from inference import InferenceWorker
+from recorder import list_existing_labels, delete_label, MIN_SAMPLES, DATA_DIR
+from trainer import TrainerManager, MIN_WINDOWS, WINDOW_SIZE
+from classifier import DEFAULT_HEAD_PATH
+from waveform import WaveformAggregator, WaveformBus
+from iso20816 import ProfileStore, StableEvaluator
+
+
+SSE_HEARTBEAT_S = 15
+RPC_TIMEOUT_S = 5.0
+ALIASES_FILENAME = "port_aliases.json"
+MACHINE_PROFILES_FILENAME = "machine_profiles.json"
+
+
+class PortAliases:
+    # Thread-safe JSON-backed port path → friendly name store. get() returns
+    # the alias or the port string itself.
+
+    def __init__(self, path):
+        self._path = path
+        self._lock = threading.Lock()
+        self._map = self._load()
+
+    def _load(self):
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items() if v}
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[aliases] failed to load {self._path}: {e}; starting empty")
+        return {}
+
+    def _save_locked(self):
+        try:
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._map, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._path)
+        except OSError as e:
+            print(f"[aliases] failed to save {self._path}: {e}")
+
+    def get(self, port, default=None):
+        with self._lock:
+            return self._map.get(port, default if default is not None else port)
+
+    def set(self, port, alias):
+        alias = (alias or "").strip()
+        with self._lock:
+            if alias:
+                self._map[port] = alias
+            else:
+                self._map.pop(port, None)
+            self._save_locked()
+
+    def as_dict(self):
+        with self._lock:
+            return dict(self._map)
+
+
+class RemoteRecorder:
+    # RPC wrapper that reads like a local RecordingManager; every call
+    # round-trips over an mp.Queue pair to the reader subprocess. Lock
+    # serialises so concurrent Flask requests can't interleave put/get.
+
+    def __init__(self, req_q, resp_q, port):
+        self._req_q = req_q
+        self._resp_q = resp_q
+        self._port = port               # debug strings only
+        self._next_id = 0
+        self._lock = threading.Lock()
+
+    def _call(self, op, **kwargs):
+        with self._lock:
+            # Drain stale responses from earlier timed-out RPCs so the req_id
+            # match below stays meaningful.
+            try:
+                while True:
+                    self._resp_q.get_nowait()
+            except queue.Empty:
+                pass
+
+            req_id = self._next_id
+            self._next_id += 1
+            self._req_q.put({"op": op, "req_id": req_id, "kwargs": kwargs})
+
+            try:
+                resp = self._resp_q.get(timeout=RPC_TIMEOUT_S)
+            except queue.Empty:
+                raise RuntimeError(
+                    f"recorder RPC timed out after {RPC_TIMEOUT_S}s "
+                    f"(port={self._port}, op={op})")
+
+        if resp.get("req_id") != req_id:
+            raise RuntimeError(
+                f"out-of-order recorder RPC response "
+                f"(expected req_id={req_id}, got {resp.get('req_id')})")
+        if not resp["ok"]:
+            err_cls = {"ValueError": ValueError,
+                       "RuntimeError": RuntimeError}.get(
+                resp.get("error_type"), RuntimeError)
+            raise err_cls(resp["error"])
+        return resp["result"]
+
+    def start(self, name, target_samples, port, mode):
+        return self._call("start", name=name, target_samples=target_samples,
+                          port=port, mode=mode)
+
+    def cancel(self):
+        return self._call("cancel")
+
+    def status(self):
+        return self._call("status")
+
+
+def build_app():
+    ports = [p for p in get_existed_serial_ports() if p in ALLOWED_PORTS]
+    print(f"[app] sensors detected: {ports}")
+
+    data_dir = os.path.join(current_path, DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    print(f"[app] data dir: {data_dir}")
+
+    head_path = os.path.join(current_path, DEFAULT_HEAD_PATH)
+    aliases = PortAliases(os.path.join(current_path, ALIASES_FILENAME))
+    machine_profiles = ProfileStore(
+        os.path.join(current_path, MACHINE_PROFILES_FILENAME))
+    iso_evaluator = StableEvaluator()
+
+    # mp.Queue caps: window pickling ~1-2 ms vs 167 ms hop; cap 16 gives 4
+    # readers headroom before put() blocks (drop-oldest kicks in first).
+    window_queue = mp.Queue(maxsize=16)
+    metrics_queue = mp.Queue(maxsize=16)
+    raw_queue = mp.Queue(maxsize=64)      # fast raw-sample chunks for waveform
+    bus = SnapshotBus()
+    waveform_bus = WaveformBus()
+    metrics_bus = SnapshotBus()
+    rolling_predictions = {p: RollingPredictions(on_latch=bus.bump) for p in ports}
+    waveform_agg = WaveformAggregator(ports)
+
+    metrics_latest = {p: None for p in ports}
+    metrics_latest_lock = threading.Lock()
+
+    req_qs   = {p: mp.Queue() for p in ports}
+    resp_qs  = {p: mp.Queue() for p in ports}
+    stop_events = {p: mp.Event() for p in ports}
+    # active_events gate FC04 raw streaming; metrics_events gate FC03 polling.
+    # Both start CLEAR (every reader idle on boot) and are independent.
+    active_events  = {p: mp.Event() for p in ports}
+    metrics_events = {p: mp.Event() for p in ports}
+    reader_procs = {}
+    for p in ports:
+        proc = mp.Process(
+            target=reader_process_main,
+            args=(p, window_queue, req_qs[p], resp_qs[p],
+                  stop_events[p], active_events[p], data_dir,
+                  metrics_events[p], metrics_queue, raw_queue),
+            daemon=True,
+            name=f"reader-{p.replace('/', '_')}",
+        )
+        proc.start()
+        reader_procs[p] = proc
+        print(f"[app] spawned reader process for {p} (pid={proc.pid})")
+
+    def enrich_metrics(port, snap):
+        out = dict(snap)
+        velocity = snap.get("velocity") or {}
+        out["iso20816"] = iso_evaluator.update(
+            port,
+            velocity.get("rms"),
+            machine_profiles.get(port),
+            timestamp=snap.get("ts"),
+        )
+        return out
+
+    def metrics_drain_loop():
+        while True:
+            try:
+                port, snap = metrics_queue.get(timeout=1.0)
+            except Exception:
+                continue
+            enriched = enrich_metrics(port, snap)
+            with metrics_latest_lock:
+                metrics_latest[port] = enriched
+            metrics_bus.bump()
+
+    threading.Thread(target=metrics_drain_loop, daemon=True,
+                     name="metrics-drain").start()
+
+    def raw_drain_loop():
+        while True:
+            try:
+                port, chunk = raw_queue.get(timeout=1.0)
+            except Exception:
+                continue
+            waveform_agg.append(port, chunk)
+
+    threading.Thread(target=raw_drain_loop, daemon=True, name="raw-drain").start()
+
+    # Display tick: decouples SSE push cadence from the 144 Hz append rate;
+    # FFT self-throttles inside render_tick().
+    WAVEFORM_TICK_HZ = 30
+
+    def waveform_tick_loop():
+        period = 1.0 / WAVEFORM_TICK_HZ
+        while True:
+            t0 = time.monotonic()
+            try:
+                if waveform_agg.render_tick():
+                    waveform_bus.bump()
+            except Exception as e:
+                print(f"[app] waveform tick error: {e}")
+            dt = time.monotonic() - t0
+            if dt < period:
+                time.sleep(period - dt)
+
+    threading.Thread(target=waveform_tick_loop, daemon=True,
+                     name="waveform-tick").start()
+
+    recorders = {p: RemoteRecorder(req_qs[p], resp_qs[p], p) for p in ports}
+
+    # Which port's subprocess owns the active/most-recent recording. Set on
+    # start(); never cleared, so /status keeps reporting its last_finished.
+    record_state = {"port": None}
+    record_state_lock = threading.Lock()
+
+    def current_recorder():
+        with record_state_lock:
+            p = record_state["port"]
+        return recorders.get(p)
+
+    # A reader runs if the user opened it for inference OR a recording is in
+    # progress. Tracked separately; active_events is the union. docs/modules.md.
+    active_state_lock = threading.Lock()
+    inference_open = set()
+    recording_ports = set()
+    metrics_open = set()
+
+    def _sync_reader_locked(port):
+        # Reconcile the two gates from the reasons a port might run. Caller
+        # holds active_state_lock.
+        if port in inference_open or port in recording_ports:
+            active_events[port].set()
+        else:
+            active_events[port].clear()
+        if port in metrics_open:
+            metrics_events[port].set()
+        else:
+            metrics_events[port].clear()
+
+    def open_metrics(port):
+        if port not in ports:
+            raise ValueError(f"unknown port: {port!r}")
+        with active_state_lock:
+            metrics_open.add(port)
+            _sync_reader_locked(port)
+
+    def close_metrics(port):
+        if port not in ports:
+            raise ValueError(f"unknown port: {port!r}")
+        with active_state_lock:
+            metrics_open.discard(port)
+            _sync_reader_locked(port)
+
+    def open_inference(port):
+        # Clears the rolling buffer so the dashboard shows 'waiting…'.
+        if port not in ports:
+            raise ValueError(f"unknown port: {port!r}")
+        with active_state_lock:
+            if port in inference_open:
+                return
+            rolling_predictions[port].clear()
+            inference_open.add(port)
+            _sync_reader_locked(port)
+
+    def close_inference(port):
+        if port not in ports:
+            raise ValueError(f"unknown port: {port!r}")
+        with active_state_lock:
+            inference_open.discard(port)
+            _sync_reader_locked(port)
+
+    def begin_recording(port):
+        # Wake the reader for a recording WITHOUT marking the port open for
+        # inference, so it returns to closed once recording finishes.
+        with active_state_lock:
+            recording_ports.add(port)
+            _sync_reader_locked(port)
+
+    def end_recording(port):
+        with active_state_lock:
+            recording_ports.discard(port)
+            _sync_reader_locked(port)
+
+    def release_if_finished(session):
+        # Recording auto-stops in the subprocess; main learns only via status
+        # poll. Release the reader hold once a session is no longer active.
+        if session and session.get("status") != "active":
+            port = session.get("port")
+            if port in recording_ports:
+                end_recording(port)
+
+    inferer = InferenceWorker(window_queue, rolling_predictions,
+                              head_path=head_path)
+    inferer.start()
+
+    trainer = TrainerManager(data_dir=data_dir, head_path=head_path)
+
+    def metrics_payload():
+        with metrics_latest_lock:
+            ports_out = {p: metrics_latest.get(p) for p in ports}
+        with active_state_lock:
+            open_ports = [p for p in ports if p in metrics_open]
+        return {
+            "ports": ports_out,
+            "open_ports": open_ports,
+            "now": time.time(),
+        }
+
+    def snapshot_payload():
+        now = time.time()
+        out = {}
+        for p in ports:
+            snap = rolling_predictions[p].displayable()
+            if snap is None:
+                out[p] = {
+                    "display_seq": 0,
+                    "majority_class_id": None,
+                    "majority_class_name": None,
+                    "majority_count": 0,
+                    "window_count": 0,
+                    "recent": [],
+                    "latest_ts": None,
+                }
+            else:
+                out[p] = {
+                    "display_seq": snap["display_seq"],
+                    "majority_class_id": snap["majority_class_id"],
+                    "majority_class_name": snap["majority_class_name"],
+                    "majority_count": snap["majority_count"],
+                    "window_count": snap["window_count"],
+                    "recent": snap["recent"],
+                    "latest_ts": snap["latest_ts"],
+                }
+        head = inferer.head
+        live_labels = head.labels if head is not None else ["untrained"]
+        label_colors = head.label_color_map() if head is not None else {"untrained": -1}
+        # A port awake purely for recording must not show as open here.
+        with active_state_lock:
+            active_ports = [p for p in ports if p in inference_open]
+        return {
+            "ports": out,
+            "inference_mode": inferer.mode,
+            "class_labels": live_labels,
+            "label_colors": label_colors,
+            "active_ports": active_ports,
+            "now": now,
+        }
+
+    app = Flask(__name__,
+                static_folder="static",
+                template_folder="templates")
+
+    @app.context_processor
+    def inject_globals():
+        return {
+            "inference_mode": inferer.mode,
+            "ports": ports,
+            "aliases": aliases.as_dict(),
+            "machine_profiles": machine_profiles.as_dict(ports),
+        }
+
+    @app.route("/")
+    def index():
+        return render_template("live_graph.html",
+                               active_page="graphs",
+                               sample_rate=SAMPLE_RATE,
+                               display_points=waveform_agg.display_points,
+                               window_size=waveform_agg.window_size,
+                               raw_samples=waveform_agg.raw_samples,
+                               raw_max_samples=waveform_agg.raw_max_samples)
+
+    @app.route("/inference")
+    def inference_dashboard():
+        head = inferer.head
+        labels = head.labels if head is not None else ["untrained"]
+        return render_template("dashboard.html",
+                               active_page="live",
+                               class_labels=labels,
+                               rolling_window=ROLLING_WINDOW)
+
+    @app.route("/metrics")
+    def metrics_page():
+        return render_template("metrics.html", active_page="metrics")
+
+    @app.route("/api/metrics_active", methods=["POST"])
+    def api_set_metrics_active():
+        # Open/close FC03 polling for one port. Body: {port, active}.
+        body = request.get_json(silent=True) or {}
+        port = body.get("port")
+        active = bool(body.get("active"))
+        try:
+            if active:
+                open_metrics(port)
+            else:
+                close_metrics(port)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"port": port, "active": active})
+
+    @app.route("/stream/metrics")
+    def metrics_stream():
+        def gen():
+            last_seq = metrics_bus.current_seq()
+            yield f"data: {json.dumps(metrics_payload())}\n\n"
+            while True:
+                new_seq = metrics_bus.wait_for_change(last_seq, timeout=SSE_HEARTBEAT_S)
+                if new_seq > last_seq:
+                    last_seq = new_seq
+                    yield f"data: {json.dumps(metrics_payload())}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+
+        return Response(gen(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.route("/api/waveform_config", methods=["POST"])
+    def waveform_config():
+        body = request.get_json(silent=True) or {}
+        out = {}
+        try:
+            if body.get("fft_max_hz") is not None:
+                out["fft_max_hz"] = waveform_agg.set_fft_max_hz(body["fft_max_hz"])
+                out["fft_bins"] = waveform_agg.fft_bins
+            if body.get("raw_samples") is not None:
+                out["raw_samples"] = waveform_agg.set_raw_samples(body["raw_samples"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "config values must be numbers"}), 400
+        if not out:
+            return jsonify({"error": "expected fft_max_hz or raw_samples"}), 400
+        return jsonify(out)
+
+    @app.route("/settings")
+    def settings_page():
+        return render_template("settings.html", active_page="settings")
+
+    @app.route("/api/port_alias", methods=["POST"])
+    def api_set_port_alias():
+        body = request.get_json(silent=True) or {}
+        port = body.get("port")
+        alias = body.get("alias", "")
+        if port not in ports:
+            return jsonify({"error": f"unknown port: {port!r}"}), 400
+        if not isinstance(alias, str):
+            return jsonify({"error": "alias must be a string"}), 400
+        aliases.set(port, alias)
+        return jsonify({"port": port, "alias": aliases.get(port)})
+
+    @app.route("/api/iso20816/profile", methods=["POST"])
+    def api_set_iso20816_profile():
+        body = request.get_json(silent=True) or {}
+        port = body.get("port")
+        profile = body.get("profile")
+        if port not in ports:
+            return jsonify({"error": f"unknown port: {port!r}"}), 400
+        try:
+            saved = machine_profiles.set(port, profile)
+        except (TypeError, ValueError, OSError) as e:
+            return jsonify({"error": str(e)}), 400
+
+        # Apply the new machine classification to the latest measurement now;
+        # the next FC03 metric batch will continue from this clean state.
+        iso_evaluator.reset(port)
+        with metrics_latest_lock:
+            snap = metrics_latest.get(port)
+            if snap is not None:
+                metrics_latest[port] = enrich_metrics(port, snap)
+        metrics_bus.bump()
+        return jsonify({"port": port, "profile": saved})
+
+    @app.route("/api/iso20816/profiles")
+    def iso20816_profiles_snapshot():
+        return jsonify({"profiles": machine_profiles.as_dict(ports)})
+
+    @app.route("/record")
+    def record_page():
+        return render_template("record.html",
+                               active_page="record",
+                               sample_rate=SAMPLE_RATE,
+                               min_samples=MIN_SAMPLES)
+
+    @app.route("/train")
+    def train_page():
+        head = inferer.head
+        head_labels = head.labels if head is not None else []
+        return render_template("train.html",
+                               active_page="train",
+                               window_size=WINDOW_SIZE,
+                               min_windows=MIN_WINDOWS,
+                               sample_rate=SAMPLE_RATE,
+                               head_labels=head_labels,
+                               backbone_variant=os.path.basename(inferer.model_path),
+                               backbone_present=(inferer._interp is not None))
+
+    # One-shot GET snapshots — non-streaming siblings of /stream/*, for curl/jq.
+    @app.route("/api/inference")
+    def inference_snapshot():
+        return jsonify(snapshot_payload())
+
+    @app.route("/api/metrics")
+    def metrics_snapshot():
+        return jsonify(metrics_payload())
+
+    @app.route("/api/waveform")
+    def waveform_snapshot():
+        return jsonify(waveform_agg.snapshot())
+
+    @app.route("/stream/inference")
+    def stream():
+        def gen():
+            last_seq = bus.current_seq()
+            yield f"data: {json.dumps(snapshot_payload())}\n\n"
+            while True:
+                new_seq = bus.wait_for_change(last_seq, timeout=SSE_HEARTBEAT_S)
+                if new_seq > last_seq:
+                    last_seq = new_seq
+                    yield f"data: {json.dumps(snapshot_payload())}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+
+        return Response(gen(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.route("/stream/waveform")
+    def waveform_stream():
+        def gen():
+            last_seq = waveform_bus.current_seq()
+            yield f"data: {json.dumps(waveform_agg.snapshot())}\n\n"
+            while True:
+                new_seq = waveform_bus.wait_for_change(last_seq, timeout=SSE_HEARTBEAT_S)
+                if new_seq > last_seq:
+                    last_seq = new_seq
+                    yield f"data: {json.dumps(waveform_agg.snapshot())}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+
+        return Response(gen(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+
+    @app.route("/api/recordings")
+    def recordings():
+        labels = list_existing_labels(data_dir)
+        for entry in labels:
+            entry["windows"] = entry["samples"] // WINDOW_SIZE
+            entry["eligible"] = entry["windows"] >= MIN_WINDOWS
+        return jsonify({
+            "labels": labels,
+            "ports": ports,
+            "sample_rate": SAMPLE_RATE,
+            "min_samples": MIN_SAMPLES,
+            "min_windows": MIN_WINDOWS,
+            "window_size": WINDOW_SIZE,
+            "data_dir": data_dir,
+        })
+
+    @app.route("/api/recordings/delete", methods=["POST"])
+    def recordings_delete():
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "")
+        # Don't delete a label that's currently being recorded.
+        with record_state_lock:
+            active_port = record_state["port"]
+        if active_port is not None:
+            rec = recorders.get(active_port)
+            try:
+                session = rec.status() if rec is not None else None
+            except RuntimeError:
+                session = None
+            if session and session.get("status") == "active" and session.get("name") == name:
+                return jsonify({"error": "recording in progress for this label"}), 409
+        try:
+            removed = delete_label(data_dir, name)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"deleted": removed})
+
+    @app.route("/api/record/start", methods=["POST"])
+    def record_start():
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "")
+        target_samples = body.get("target_samples")
+        port = body.get("port")
+        mode = body.get("mode", "append")
+
+        if port not in ports:
+            return jsonify({"error": f"unknown port: {port!r}. Available: {ports}"}), 400
+        if not isinstance(target_samples, int) or target_samples <= 0:
+            return jsonify({"error": "target_samples must be a positive integer"}), 400
+
+        # feed() runs in the reader subprocess — wake it first or zero samples
+        # commit. begin_recording wakes it without opening for inference.
+        begin_recording(port)
+
+        try:
+            session = recorders[port].start(name=name, target_samples=target_samples,
+                                            port=port, mode=mode)
+        except (ValueError, RuntimeError) as e:
+            return jsonify({"error": str(e)}), 400
+
+        with record_state_lock:
+            record_state["port"] = port
+        return jsonify({"session": session})
+
+    @app.route("/api/active_port", methods=["POST"])
+    def api_set_active_port():
+        # Toggle one port. Body: {port, active}. Any subset may be active.
+        body = request.get_json(silent=True) or {}
+        port = body.get("port")
+        active = bool(body.get("active"))
+        try:
+            if active:
+                open_inference(port)
+            else:
+                close_inference(port)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"port": port, "active": active})
+
+    @app.route("/api/record/status")
+    def record_status():
+        rec = current_recorder()
+        if rec is None:
+            return jsonify({"session": None})
+        try:
+            session = rec.status()
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
+        release_if_finished(session)
+        return jsonify({"session": session})
+
+    @app.route("/api/record/cancel", methods=["POST"])
+    def record_cancel():
+        rec = current_recorder()
+        if rec is None:
+            return jsonify({"session": None})
+        try:
+            session = rec.cancel()
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
+        with record_state_lock:
+            rec_port = record_state["port"]
+        if rec_port is not None:
+            end_recording(rec_port)
+        return jsonify({"session": session})
+
+    @app.route("/api/train/status")
+    def train_status():
+        head = inferer.head
+        return jsonify({
+            "session": trainer.status(),
+            "head_labels": head.labels if head is not None else [],
+            "head_colors": head.label_color_map() if head is not None else {},
+            "backbone": os.path.basename(inferer.model_path),
+            "backbone_mode": inferer.mode,
+        })
+
+    @app.route("/api/train/start", methods=["POST"])
+    def train_start():
+        body = request.get_json(silent=True) or {}
+        labels = body.get("labels") or []
+        if not isinstance(labels, list):
+            return jsonify({"error": "labels must be a list"}), 400
+        try:
+            session = trainer.start(inference_worker=inferer, selected_labels=labels)
+        except (ValueError, RuntimeError) as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"session": session})
+
+    @app.route("/api/train/cancel", methods=["POST"])
+    def train_cancel():
+        session = trainer.cancel()
+        return jsonify({"session": session})
+
+    return app
+
+
+if __name__ == "__main__":
+    app = build_app()
+    app.run(host="0.0.0.0", port=80, threaded=True, debug=False)
