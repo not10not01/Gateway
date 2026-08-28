@@ -8,8 +8,14 @@ import time
 import numpy as np
 import serial
 
-# Up to 4 sensors. Add /dev/ttyUSB1..USB3 here as more come online.
-ALLOWED_PORTS = ['/dev/ttyUSB0']
+# Up to 4 sensors. Set MATRIX800_SENSOR_PORTS to a comma-separated list, or to
+# an empty string for a safe no-sensor/demo start.
+_ports_env = os.getenv("MATRIX800_SENSOR_PORTS")
+ALLOWED_PORTS = (
+    [p.strip() for p in _ports_env.split(",") if p.strip()]
+    if _ports_env is not None
+    else ["/dev/ttyUSB0"]
+)
 
 WINDOW_SIZE   = 2604     # 1/2 sec at 7812 Hz — must match the trained backbone
 HOP_SIZE      = 1302     # 50 % overlap → ~6 window emits/sec (inference path)

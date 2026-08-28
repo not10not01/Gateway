@@ -30,6 +30,12 @@ pip install -r requirements.txt
 python app.py                   # http://<board-ip>/
 ```
 
+尚未接 sensor 時，可用一般帳號在 8080 埠安全測試網頁：
+
+```bash
+MATRIX800_SENSOR_PORTS='' MATRIX800_HTTP_PORT=8080 python3 app.py
+```
+
 在實機上，請**先設定 NPU 驅動程式**——這是設錯就會無聲失敗的關鍵步驟。
 請見 [getting-started.md](docs/getting-started.zh-TW.md#3-choose-your-npu-driver)。
 

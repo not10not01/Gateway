@@ -9,6 +9,7 @@ import time
 # Bundled deps live in ./site-packages on the embedded device. Harmless when
 # empty; spawned children re-apply it (see reader_process_main). docs/modules.md.
 current_path = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(current_path, ".packages"))
 sys.path.insert(0, os.path.join(current_path, "site-packages"))
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -712,4 +713,5 @@ def build_app():
 
 if __name__ == "__main__":
     app = build_app()
-    app.run(host="0.0.0.0", port=80, threaded=True, debug=False)
+    http_port = int(os.getenv("MATRIX800_HTTP_PORT", "80"))
+    app.run(host="0.0.0.0", port=http_port, threaded=True, debug=False)
