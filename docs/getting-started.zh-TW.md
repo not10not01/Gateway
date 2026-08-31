@@ -64,6 +64,9 @@ ls /dev/accel     # 存在 → Mesa 驅動
 <a id="4-connect-the-sensors"></a>
 ## 4. 連接感測器
 
+ULTEST 微型多軸 Sensor 的 5 V 供電、P1 接線、baud 與完整 register map 請先見
+[ULTEST Sensor 整合指南](sensor-ultest.zh-TW.md)。
+
 列出你的埠：
 
 ```bash

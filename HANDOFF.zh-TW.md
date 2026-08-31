@@ -119,7 +119,10 @@ models/vibration_backbone_int8_vela.tflite
 
 ## D. Sensor 到貨後
 
-1. 將 Sensor 的 RS-485 A/B、電源及接地依原廠文件接到 P1。
+先閱讀 `docs/sensor-ultest.zh-TW.md`。ULTEST Sensor 規格為 **5 VDC、<100 mA**；
+P1 D+/D- 只有 RS-485 資料，不提供 Sensor 電源。
+
+1. 將 Sensor 的 RS-485 A/B 接到 P1 D+/D-，5 V 與 GND 接獨立穩壓電源。
 2. P1 對應 `/dev/ttyUSB0`。
 3. 核對 Sensor 是否符合目前程式假設：
 

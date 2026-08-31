@@ -263,8 +263,8 @@ def reader_process_main(port, window_queue, req_q, resp_q,
     def read_metrics_batch():
         # Full FC03 sweep → one snapshot dict. Raises ModbusError on any read.
         temp = _hold(REG_TEMPERATURE, 1)[0] / 100.0
-        g_freq = float(_hold(REG_GRAVITY_PRIM_FREQ, 1)[0])
-        v_freq = float(_hold(REG_VELOCITY_PRIM_FREQ, 1)[0])
+        g_freq = _triple(REG_GRAVITY_PRIM_FREQ, 10.0)
+        v_freq = _triple(REG_VELOCITY_PRIM_FREQ, 10.0)
         return {
             "ts": time.time(),
             "temperature": temp,
@@ -279,7 +279,7 @@ def reader_process_main(port, window_queue, req_q, resp_q,
             "velocity": {
                 "rms":   _triple(REG_VELOCITY_RMS, 100.0),
                 "peak":  _triple(REG_VELOCITY_PEAK, 100.0),
-                "crest": _triple(REG_VELOCITY_CREST, 100.0),
+                "crest": _triple(REG_VELOCITY_CREST, 1000.0),
                 "primary_freq": v_freq,
             },
         }

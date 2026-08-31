@@ -9,6 +9,8 @@ Modbus RTU 串流原始 XYZ 資料 → 凍結的 CNN 骨幹網路在 NPU 上執�
 
 ISO 功能的部署、量測前提與機台設定請先閱讀
 [ISO 20816 部署指南](docs/iso20816.zh-TW.md)。系統不會自動停機。
+實際 ULTEST Sensor 的 5 V 供電、P1 接線、Modbus register 與換算請見
+[ULTEST Sensor 整合指南](docs/sensor-ultest.zh-TW.md)。
 
 若要把整包移到另一台電腦，請從
 [可攜式交接手冊](HANDOFF.zh-TW.md) 開始；其中包含 Windows 網路設定、實機資訊、

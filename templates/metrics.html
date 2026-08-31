@@ -195,7 +195,11 @@ function setMetricsActive(active) {
 const fmtTriple = (v) => (v == null ? "—" : Number(v).toFixed(3));
 const fmtVel    = (v) => (v == null ? "—" : Number(v).toFixed(2));
 const fmtTemp   = (v) => (v == null ? "—" : Number(v).toFixed(1));
-const fmtFreq   = (v) => (v == null ? "—" : Number(v).toFixed(0));
+const fmtFreq   = (v) => {
+  if (v == null) return "—";
+  if (Array.isArray(v)) return v.map(x => Number(x).toFixed(1)).join(" / ");
+  return Number(v).toFixed(1);
+};
 
 function renderPort(port, snap) {
   const map = cells.get(port);
