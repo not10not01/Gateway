@@ -2,35 +2,38 @@
 {% block title %}Edge AI machine health{% endblock %}
 {% block head %}
 <style>
-.hero{background:linear-gradient(135deg,#101b35,#172b4d);color:#fff;border-radius:18px;padding:24px;margin-bottom:18px}.hero h1{margin:0 0 8px}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}.panel{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:20px}.diagnosis{font-size:32px;font-weight:700;margin:10px 0}.confidence{font-size:54px;font-weight:700;color:#20a66a}.buttons{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.fault{padding:13px;border:1px solid #ccd5e2;border-radius:10px;background:#f7f9fc;cursor:pointer;font-weight:600}.fault:hover,.fault.active{background:#1769e0;color:#fff}.bar-row{display:grid;grid-template-columns:110px 1fr 52px;gap:8px;align-items:center;margin:10px 0}.bar{height:10px;background:#e8edf4;border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:#1769e0}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}.meta div{background:#f4f7fb;border-radius:10px;padding:12px}.meta small{display:block;color:#697386}@media(max-width:900px){.grid{grid-template-columns:1fr}.meta{grid-template-columns:1fr}}
+.hero{background:linear-gradient(135deg,#101b35,#172b4d);color:#fff;border-radius:18px;padding:24px;margin-bottom:18px}.hero h1{margin:0 0 8px}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}.panel{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:20px}.diagnosis{font-size:32px;font-weight:700;margin:10px 0}.confidence{font-size:54px;font-weight:700;color:#20a66a}.buttons{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.fault{padding:13px;border:1px solid #ccd5e2;border-radius:10px;background:#f7f9fc;cursor:pointer;font-weight:600}.fault:hover,.fault.active{background:#1769e0;color:#fff}.bar-row{display:grid;grid-template-columns:110px 1fr 52px;gap:8px;align-items:center;margin:10px 0}.bar{height:10px;background:#e8edf4;border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:#1769e0}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}.meta div{background:#f4f7fb;border-radius:10px;padding:12px}.meta small{display:block;color:#697386}.notice{background:#fff7db;border:1px solid #f0d36c;border-radius:10px;padding:11px;color:#665314}.hidden{display:none}@media(max-width:900px){.grid{grid-template-columns:1fr}.meta{grid-template-columns:1fr}}
 </style>
 {% endblock %}
 {% block content %}
-<div class="hero"><h1>Edge AI Machine Health Radar</h1><div>Synthetic vibration → FFT features → tiny on-device model → ISO 20816</div></div>
+<div class="hero"><h1>Edge AI Machine Health Radar</h1><div>Vibration sensor → FFT features → tiny on-device model → ISO 20816</div></div>
 <div class="grid">
   <section class="panel">
     <small>LIVE DIAGNOSIS</small><div id="diagnosis" class="diagnosis">Warming up…</div>
     <div id="confidence" class="confidence">--%</div><div id="bars"></div>
     <div class="meta"><div><small>Backend</small><b id="backend">--</b></div><div><small>Latency</small><b id="latency">--</b></div><div><small>ISO Zone</small><b id="zone">--</b></div></div>
   </section>
-  <section class="panel"><h2>Fault injection</h2><p>Choose a synthetic machine condition.</p>
-    <div class="buttons">
+  <section class="panel"><h2 id="source-title">Signal source</h2><p id="source-help">Detecting the connected sensor…</p>
+    <div id="fault-buttons" class="buttons hidden">
       <button class="fault" data-fault="normal">Normal</button><button class="fault" data-fault="imbalance">Imbalance</button>
       <button class="fault" data-fault="misalignment">Misalignment</button><button class="fault" data-fault="looseness">Looseness</button>
       <button class="fault" data-fault="bearing">Bearing impact</button>
-    </div><p id="sensor-state"></p>
+    </div><p id="sensor-state"></p><p id="model-notice" class="notice hidden">This lightweight model was trained with synthetic signals. Its result is a demo classification, not a validated diagnosis of the connected machine.</p>
   </section>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
-const port='/dev/sim0';
 async function choose(fault){await fetch('/api/simulator',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fault})});document.querySelectorAll('.fault').forEach(b=>b.classList.toggle('active',b.dataset.fault===fault));}
 document.querySelectorAll('.fault').forEach(b=>b.onclick=()=>choose(b.dataset.fault));
 async function refresh(){
- try{const [a,m,s]=await Promise.all([fetch('/api/edge-ai').then(r=>r.json()),fetch('/api/metrics').then(r=>r.json()),fetch('/api/simulator').then(r=>r.json())]);const x=a.ports[port];
+ try{const [a,m,s]=await Promise.all([fetch('/api/edge-ai').then(r=>r.json()),fetch('/api/metrics').then(r=>r.json()),fetch('/api/simulator').then(async r=>r.ok?r.json():({enabled:false}))]);
+ const edgePorts=a.ports||{}, metricPorts=m.ports||{};const port=Object.keys(edgePorts).find(p=>edgePorts[p])||Object.keys(metricPorts)[0];const x=port?edgePorts[port]:null;
  if(x){diagnosis.textContent=x.label;confidence.textContent=Math.round(x.confidence*100)+'%';backend.textContent=x.backend;latency.textContent=x.latency_ms+' ms';bars.innerHTML=Object.entries(x.probabilities).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="bar-row"><span>${k}</span><div class="bar"><i style="width:${v*100}%"></i></div><b>${Math.round(v*100)}%</b></div>`).join('');}
- const iso=m.ports[port]?.iso20816;zone.textContent=iso?.zone||'--';sensorState.textContent=`Simulated: ${s.fault} · ${s.velocity_mm_s} mm/s`;
+ const iso=port?metricPorts[port]?.iso20816:null;zone.textContent=iso?.zone||'--';
+ const simulated=Boolean(s.enabled);document.getElementById('fault-buttons').classList.toggle('hidden',!simulated);document.getElementById('model-notice').classList.toggle('hidden',simulated);
+ document.getElementById('source-title').textContent=simulated?'Fault injection':'Connected sensor';document.getElementById('source-help').textContent=simulated?'Choose a synthetic machine condition.':'Live data is being read directly on the gateway.';
+ sensorState.textContent=simulated?`Simulated: ${s.fault} · ${s.velocity_mm_s} mm/s`:(port?`Live sensor: ${port}`:'Waiting for sensor data…');
  }catch(e){} setTimeout(refresh,700);
 }
 const sensorState=document.getElementById('sensor-state');refresh();

@@ -47,6 +47,7 @@ REG_VELOCITY_PRIM_FREQ = 0x003C   # 1 reg, raw Hz
 # fallback forces a refresh even if it sits still. See docs/modules.md.
 KURT_POLL_INTERVAL_S = 0.4
 METRIC_FALLBACK_S    = 5.0
+METRIC_MIN_REFRESH_S = 10.0  # leave enough serial time for raw/Edge-AI windows
 # FC03 reads are slow + variable (~0.5-1 s); a premature timeout desyncs the
 # stream forever. Generous timeout + line drain to resync. docs/modules.md.
 METRIC_READ_TIMEOUT_S = 5.0
@@ -159,12 +160,42 @@ def reader_process_main(port, window_queue, req_q, resp_q,
                             stopbits=stopbits,
                             timeout=timeout)
 
-    chip = read_input_registers(client, 1, 0x80, 3)
-    print(f"[{port}] ChipID: {hex(chip[0])}, {hex(chip[1])}, {hex(chip[2])}")
-    print(f"[{port}] SampleRate: {sample_rate}")
-    write_single_register(client, 1, 0x01, sample_rate)
+    # A previous process may have been stopped while a reply was still in the
+    # USB/RS-485 buffer.  Drain and retry the whole handshake instead of letting
+    # one stale frame kill the reader subprocess at startup.
+    startup_attempt = 0
+    while not stop_event.is_set():
+        startup_attempt += 1
+        try:
+            old_timeout = client.timeout
+            client.timeout = 0.03
+            while client.read(256):
+                pass
+            client.timeout = old_timeout
+            client.reset_input_buffer()
 
-    data_len = read_input_registers(client, 1, 0x02, 1)[0]
+            chip = read_input_registers(client, 1, 0x80, 3)
+            print(f"[{port}] ChipID: {hex(chip[0])}, {hex(chip[1])}, {hex(chip[2])}")
+            print(f"[{port}] SampleRate: {sample_rate}")
+            write_single_register(client, 1, 0x01, sample_rate)
+            data_len = read_input_registers(client, 1, 0x02, 1)[0]
+            break
+        except (ModbusError, serial.SerialException, OSError) as e:
+            client.timeout = timeout
+            print(f"[{port}] startup handshake attempt {startup_attempt} failed: "
+                  f"{type(e).__name__}: {e}")
+            if startup_attempt % 3 == 0:
+                try:
+                    client.close()
+                    time.sleep(0.1)
+                    client.open()
+                except Exception as reopen_error:
+                    print(f"[{port}] startup reopen failed: {reopen_error}")
+            time.sleep(0.2)
+    else:
+        client.close()
+        return
+
     print(f"[{port}] Initial buffer length: {data_len}")
 
     # Pre-allocated ring: WINDOW_SIZE valid samples + one MAX_PACKET tail
@@ -232,10 +263,11 @@ def reader_process_main(port, window_queue, req_q, resp_q,
             pass
 
     def _abort_metrics():
-        # Raw streaming takes priority — bail out of metric reads when raw is
-        # requested, metrics are off, or we're shutting down.
+        # The serial port is owned by this one process, so FC03 metrics and FC04
+        # raw reads can be interleaved safely. Abort only when metrics are closed
+        # or the process is stopping; aborting merely because raw is active made
+        # the Metrics/ISO page impossible to use alongside Edge AI.
         return (stop_event.is_set()
-                or active_event.is_set()
                 or (metrics_event is not None and not metrics_event.is_set()))
 
     def _hold(addr, count):
@@ -295,6 +327,11 @@ def reader_process_main(port, window_queue, req_q, resp_q,
         # METRIC_FALLBACK_S.
         nonlocal last_kurt_regs, last_kurt_poll_t, last_metric_emit_t
         now = time.time()
+        # When raw streaming is also active, even the preliminary FC03 poll can
+        # monopolize this sensor's slow computed-metric interface. Keep the
+        # entire FC03 path quiet between snapshots so Edge AI receives samples.
+        if last_metric_emit_t and now - last_metric_emit_t < METRIC_MIN_REFRESH_S:
+            return
         if now - last_kurt_poll_t < KURT_POLL_INTERVAL_S:
             return
         last_kurt_poll_t = now
@@ -312,6 +349,11 @@ def reader_process_main(port, window_queue, req_q, resp_q,
             fallback = (now - last_metric_emit_t >= METRIC_FALLBACK_S)
             if not (changed or fallback):
                 return
+            # A full metric sweep contains many relatively slow FC03 requests.
+            # Without this guard, constantly changing kurtosis starts another
+            # sweep immediately and starves the high-rate raw waveform/model.
+            if last_metric_emit_t and now - last_metric_emit_t < METRIC_MIN_REFRESH_S:
+                return
             try:
                 snap = read_metrics_batch()
             except _MetricsAbort:
@@ -320,7 +362,10 @@ def reader_process_main(port, window_queue, req_q, resp_q,
                 print(f"[{port}] metrics batch failed: {e}")
                 return
             last_kurt_regs = kurt
-            last_metric_emit_t = now
+            # Measure the quiet interval from completion, not from the start of
+            # this slow sweep; otherwise a five-second sweep immediately meets
+            # a five-second refresh threshold and starts again.
+            last_metric_emit_t = time.time()
             if metrics_queue is not None:
                 try:
                     metrics_queue.put_nowait((port, snap))
