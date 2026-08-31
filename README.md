@@ -14,6 +14,8 @@ machine automatically.
 
 For transfer to another computer, start with the
 [portable handoff guide](HANDOFF.zh-TW.md).
+For the verified LAN2/P1 workflow, manual restart, web UI, ISO interpretation,
+and troubleshooting, use the [Traditional Chinese field operation guide](docs/operation-guide.zh-TW.md).
 
 **See actual interface**: [api.md → page details](docs/api.md#page-details).
 
@@ -68,3 +70,5 @@ missing — the dashboard still renders). No CPU fallback.
 | [architecture.md](docs/architecture.md) | How and why it's built this way |
 | [modules.md](docs/modules.md) | Per-file notes for editing internals |
 | [iso20816.zh-TW.md](docs/iso20816.zh-TW.md) | ISO 20816 configuration and gateway deployment (zh-Hant) |
+| [operation-guide.zh-TW.md](docs/operation-guide.zh-TW.md) | Verified field operation, web UI and troubleshooting (zh-Hant) |
+| [sensor-ultest.zh-TW.md](docs/sensor-ultest.zh-TW.md) | ULTEST power, P1 wiring and Modbus registers (zh-Hant) |

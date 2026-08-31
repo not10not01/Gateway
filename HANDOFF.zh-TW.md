@@ -1,5 +1,9 @@
 # Matrix-800 ISO 20816 可攜式交接手冊
 
+> 日常操作請優先閱讀 [`docs/operation-guide.zh-TW.md`](docs/operation-guide.zh-TW.md)。
+> 該文件反映目前實機使用的 `/home/guest/matrix800-iso20816-gateway.new`、8080 埠、
+> 真實 Sensor、Edge AI 與 ISO 網頁流程；本手冊其餘章節著重全新電腦/正式 `/opt` 部署。
+
 這個資料夾可以複製到另一台 Windows、Linux 電腦或 Matrix-800。建議架構是：
 
 ```text
@@ -173,7 +177,7 @@ sudo journalctl -u matrix800-iso20816 -f
 
 - 系統只提供狀態評估，不會自動停機。
 - 正式停機需結合 OEM 限值、趨勢、負載及現場風險。
-- 預設帳密只用於首次連線，完成後應執行 `passwd guest`、`passwd root`。
+- 初始帳密只用於首次設定；完成後應更改 `guest`、`root` 密碼，且不得把密碼寫入 Git。
 - 不要在未確認 Sensor 頻帶與校正前，把 Zone 當作正式驗收結果。
 
 更完整的 ISO 說明請見 `docs/iso20816.zh-TW.md`。

@@ -16,6 +16,9 @@ ISO 功能的部署、量測前提與機台設定請先閱讀
 [可攜式交接手冊](HANDOFF.zh-TW.md) 開始；其中包含 Windows 網路設定、實機資訊、
 無 Sensor 測試、Gateway 部署與 systemd 步驟。
 
+現場每天操作、重開後手動連線、網頁入口、ISO Pass/Fail 判讀與故障排除，請直接看
+[Matrix-800 現場操作手冊](docs/operation-guide.zh-TW.md)。
+
 **查看實際介面**：[api.md → 頁面細節](docs/api.zh-TW.md#page-details)。
 
 <p float="left">
@@ -91,3 +94,5 @@ int8 骨幹網路。W3 把一切接起來，並透過 SSE 把快照推送到瀏�
 | [architecture.md](docs/architecture.zh-TW.md) | 系統如何運作、為何這樣設計 |
 | [modules.md](docs/modules.zh-TW.md) | 各檔案的內部設計註記 |
 | [iso20816.zh-TW.md](docs/iso20816.zh-TW.md) | ISO 20816-3 設定、API 與 Gateway 部署 |
+| [operation-guide.zh-TW.md](docs/operation-guide.zh-TW.md) | 實機連線、手動啟動、網頁 ISO 操作與故障排除 |
+| [sensor-ultest.zh-TW.md](docs/sensor-ultest.zh-TW.md) | ULTEST Sensor 供電、P1 接線與 Modbus 暫存器 |
