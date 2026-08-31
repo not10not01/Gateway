@@ -21,10 +21,11 @@ class SimulatedSensor(threading.Thread):
         self._lock = threading.RLock()
         self._mode = "auto"
         self._velocity = float(initial_velocity)
+        self._fault = "normal"
         self._started_at = time.monotonic()
         self._sample_index = 0
 
-    def configure(self, mode=None, velocity_mm_s=None):
+    def configure(self, mode=None, velocity_mm_s=None, fault=None):
         with self._lock:
             if mode is not None:
                 if mode not in ("auto", "manual"):
@@ -36,13 +37,25 @@ class SimulatedSensor(threading.Thread):
                     raise ValueError("velocity_mm_s must be between 0 and 100")
                 self._velocity = value
                 self._mode = "manual"
+            if fault is not None:
+                fault = str(fault).strip().lower()
+                allowed = ("normal", "imbalance", "misalignment", "looseness", "bearing")
+                if fault not in allowed:
+                    raise ValueError("fault must be one of: " + ", ".join(allowed))
+                self._fault = fault
+                self._mode = "manual"
+                self._velocity = {
+                    "normal": 0.8, "imbalance": 3.5, "misalignment": 3.2,
+                    "looseness": 4.0, "bearing": 5.2,
+                }[fault]
             return self.status()
 
     def status(self):
         with self._lock:
             return {"enabled": True, "port": self.port,
                     "mode": self._mode,
-                    "velocity_mm_s": self._current_velocity_locked()}
+                    "velocity_mm_s": self._current_velocity_locked(),
+                    "fault": self._fault}
 
     def _current_velocity_locked(self):
         if self._mode == "manual":
@@ -74,23 +87,40 @@ class SimulatedSensor(threading.Thread):
             "simulated": True,
         }
 
+    def _make_chunk(self, velocity, fault, chunk_size):
+        idx = np.arange(self._sample_index,
+                        self._sample_index + chunk_size, dtype=np.float32)
+        t = idx / self.sample_rate
+        p1 = 2.0 * math.pi * 30.0 * t
+        base = 0.022 * np.sin(p1)
+        if fault == "imbalance":
+            signal = 0.10 * np.sin(p1)
+        elif fault == "misalignment":
+            signal = 0.055 * np.sin(p1) + 0.040 * np.sin(2 * p1 + 0.3)
+        elif fault == "looseness":
+            signal = (0.050 * np.sin(p1) + 0.032 * np.sin(2 * p1) +
+                      0.025 * np.sin(3 * p1 + 0.4))
+            signal *= 1.0 + 0.45 * np.sin(2.0 * math.pi * 3.0 * t)
+        elif fault == "bearing":
+            carrier = np.sin(2.0 * math.pi * 300.0 * t)
+            impacts = np.maximum(0.0, np.sin(2.0 * math.pi * 12.0 * t)) ** 10
+            signal = 0.018 * np.sin(p1) + 0.12 * impacts * carrier
+        else:
+            signal = base
+        chunk = np.column_stack((
+            signal, 0.82 * np.roll(signal, 7), 0.66 * np.roll(signal, 13)
+        )).astype(np.float32)
+        self._sample_index += chunk_size
+        return chunk
+
     def run(self):
         chunk_size = 217
         next_metrics = 0.0
         while True:
             with self._lock:
                 velocity = self._current_velocity_locked()
-            # A stable 30 Hz three-axis acceleration waveform for the live page.
-            idx = np.arange(self._sample_index,
-                            self._sample_index + chunk_size, dtype=np.float32)
-            phase = 2.0 * math.pi * 30.0 * idx / self.sample_rate
-            amplitude_g = 0.02 + velocity * 0.004
-            chunk = np.column_stack((
-                amplitude_g * np.sin(phase),
-                amplitude_g * 0.8 * np.sin(phase + 0.7),
-                amplitude_g * 0.6 * np.sin(phase + 1.4),
-            )).astype(np.float32)
-            self._sample_index += chunk_size
+                fault = self._fault
+            chunk = self._make_chunk(velocity, fault, chunk_size)
             try:
                 self.raw_queue.put_nowait((self.port, chunk))
             except Exception:

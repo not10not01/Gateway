@@ -1,0 +1,14 @@
+{
+  "name": "Tiny Vibration Fault Classifier",
+  "version": "1.0.0-demo",
+  "features": ["rms_g", "crest_factor", "ratio_1x", "ratio_2x", "ratio_3x", "ratio_bearing", "high_frequency_ratio"],
+  "labels": ["Normal", "Imbalance", "Misalignment", "Looseness", "Bearing impact"],
+  "feature_scales": [0.025, 0.8, 0.18, 0.12, 0.10, 0.12, 0.12],
+  "prototypes": [
+    [0.016, 1.45, 0.94, 0.03, 0.02, 0.01, 0.02],
+    [0.070, 1.45, 0.96, 0.02, 0.01, 0.01, 0.02],
+    [0.045, 1.90, 0.58, 0.36, 0.03, 0.03, 0.06],
+    [0.050, 2.60, 0.48, 0.27, 0.19, 0.06, 0.14],
+    [0.045, 4.50, 0.18, 0.06, 0.03, 0.73, 0.68]
+  ]
+}

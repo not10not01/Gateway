@@ -24,6 +24,7 @@ from classifier import DEFAULT_HEAD_PATH
 from waveform import WaveformAggregator, WaveformBus
 from iso20816 import ProfileStore, StableEvaluator
 from simulator import SimulatedSensor, SIMULATED_PORT
+from edge_ai import TinyFaultModel, EdgeAIEngine
 
 
 SSE_HEARTBEAT_S = 15
@@ -168,6 +169,8 @@ def build_app():
     metrics_bus = SnapshotBus()
     rolling_predictions = {p: RollingPredictions(on_latch=bus.bump) for p in ports}
     waveform_agg = WaveformAggregator(ports)
+    edge_model = TinyFaultModel(os.path.join(current_path, "models", "tiny_fault_model.json"))
+    edge_engine = EdgeAIEngine(ports, edge_model)
 
     metrics_latest = {p: None for p in ports}
     metrics_latest_lock = threading.Lock()
@@ -227,6 +230,7 @@ def build_app():
             except Exception:
                 continue
             waveform_agg.append(port, chunk)
+            edge_engine.append(port, chunk)
 
     threading.Thread(target=raw_drain_loop, daemon=True, name="raw-drain").start()
 
@@ -432,6 +436,10 @@ def build_app():
     def metrics_page():
         return render_template("metrics.html", active_page="metrics")
 
+    @app.route("/edge-ai")
+    def edge_ai_page():
+        return render_template("edge_ai.html", active_page="edge-ai")
+
     @app.route("/api/metrics_active", methods=["POST"])
     def api_set_metrics_active():
         # Open/close FC03 polling for one port. Body: {port, active}.
@@ -562,9 +570,14 @@ def build_app():
         try:
             return jsonify(simulator.configure(
                 mode=body.get("mode"),
-                velocity_mm_s=body.get("velocity_mm_s")))
+                velocity_mm_s=body.get("velocity_mm_s"),
+                fault=body.get("fault")))
         except (TypeError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.route("/api/edge-ai")
+    def edge_ai_snapshot():
+        return jsonify(edge_engine.snapshot())
 
     @app.route("/api/waveform")
     def waveform_snapshot():

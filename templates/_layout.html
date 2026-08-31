@@ -45,6 +45,13 @@
         </svg>
         <span>Metrics data</span>
       </a>
+      <a class="nav-item {% if active_page == 'edge-ai' %}active{% endif %}" href="{{ url_for('edge_ai_page') }}">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 3h6v3h3v3h3v6h-3v3h-3v3H9v-3H6v-3H3V9h3V6h3z"/>
+          <circle cx="9" cy="11" r="1"/><circle cx="15" cy="11" r="1"/><path d="M9 15h6"/>
+        </svg>
+        <span>Edge AI demo</span>
+      </a>
       <a class="nav-item {% if active_page == 'record' %}active{% endif %}" href="{{ url_for('record_page') }}">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">

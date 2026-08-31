@@ -44,6 +44,14 @@ curl -X POST http://127.0.0.1:8080/api/simulator \
   -d '{"velocity_mm_s":3.5}'
 ```
 
+### 輕量 Edge AI Demo
+
+啟動模擬模式後開啟 `http://<gateway-ip>:8080/edge-ai`。頁面可注入 Normal、
+Imbalance、Misalignment、Looseness 與 Bearing impact 五種合成振動；Gateway
+上的 `models/tiny_fault_model.json` 會利用 FFT/RMS/crest factor 特徵即時分類。
+此 Demo 只需要 NumPy，可先在 Cortex-A55 CPU 驗證完整流程，之後再替換成
+Vela 編譯的 INT8 Ethos-U65 模型。
+
 在實機上，請**先設定 NPU 驅動程式**——這是設錯就會無聲失敗的關鍵步驟。
 請見 [getting-started.md](docs/getting-started.zh-TW.md#3-choose-your-npu-driver)。
 
