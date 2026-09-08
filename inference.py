@@ -57,24 +57,25 @@ class InferenceWorker(threading.Thread):
         if not os.path.exists(self.model_path):
             print(f"[inference] model not found at {self.model_path}; stub mode")
             return
-        if not os.path.exists(self.delegate_path):
-            print(f"[inference] Ethos-U delegate not found at {self.delegate_path}; stub mode")
-            return
-
         try:
-            delegate = load_delegate(self.delegate_path)
-            interp = Interpreter(model_path=self.model_path,
-                                 experimental_delegates=[delegate])
+            if self.delegate_path:
+                delegate = load_delegate(self.delegate_path)
+                interp = Interpreter(model_path=self.model_path,
+                                     experimental_delegates=[delegate])
+                backend = "npu"
+            else:
+                interp = Interpreter(model_path=self.model_path)
+                backend = "cpu"
             interp.allocate_tensors()
         except Exception as e:
             print(f"[inference] NPU delegate failed ({e}); stub mode")
             return
 
         self._interp = interp
-        self.mode = "npu"
+        self.mode = backend
         self._inp = interp.get_input_details()[0]
         self._out = interp.get_output_details()[0]
-        print(f"[inference] NPU delegate loaded from {self.delegate_path}")
+        print(f"[inference] interpreter loaded, backend={backend}, delegate={self.delegate_path or 'none'}")
         print(f"[inference] backbone={os.path.basename(NPU_MODEL_PATH)} mode={self.mode} "
               f"input={self._inp['shape']} {self._inp['dtype']} "
               f"output={self._out['shape']} {self._out['dtype']}")
