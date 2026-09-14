@@ -1,6 +1,10 @@
-__pycache__
-.venv/
+__pycache__/
 *.pyc
+.venv/
+venv312/
+.packages/
+site-packages/
+app.log
 machine_profiles.json
 port_aliases.json
 classifier_head.json
